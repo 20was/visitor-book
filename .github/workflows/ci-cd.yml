@@ -1,0 +1,287 @@
+# This is our main CI/CD pipeline configuration file
+# Think of it as a recipe book that tells GitHub Actions how to build, test, and deploy our application
+# Just like a recipe has different steps (prep, cook, serve), our pipeline has different stages (test, build, deploy)
+
+name: CI/CD Pipeline
+
+# This section defines WHEN our pipeline should run
+# It's like setting up automatic triggers - similar to how a security camera starts recording when it detects motion
+on:
+  push:
+    branches: [main, develop] # Run when code is pushed to main or develop branches
+  pull_request:
+    branches: [main] # Run when someone creates a pull request targeting the main branch
+
+# Environment variables - think of these as global settings that all jobs can access
+# Like having a shared pantry in a restaurant kitchen that all chefs can use
+env:
+  REGISTRY: ghcr.io # GitHub Container Registry - where we store our Docker images
+  IMAGE_NAME_FRONTEND: ${{ github.repository }}-frontend # Name for our frontend Docker image
+  IMAGE_NAME_BACKEND: ${{ github.repository }}-backend # Name for our backend Docker image
+
+jobs:
+  # Frontend Tests and Build
+  # This job is like a quality control check for our frontend code
+  # Similar to how a car manufacturer tests each component before assembly
+  frontend-test:
+    runs-on: ubuntu-latest # Use the latest Ubuntu virtual machine
+    defaults:
+      run:
+        working-directory: ./visitor-book-frontend # All commands will run from this directory
+
+    steps:
+      # Step 1: Get our code
+      # Like checking out a book from a library
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js
+      # Like installing the right tools in our workshop
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Use Node.js version 20
+          cache: 'npm' # Cache npm dependencies to speed up future runs
+          cache-dependency-path: visitor-book-frontend/package-lock.json
+
+      # Step 3: Install dependencies
+      # Like gathering all ingredients before cooking
+      - name: Install dependencies
+        run: npm ci
+
+      # Step 4: Run linting
+      # Like having a spell-checker for our code
+      - name: Run linting
+        run: npm run lint
+
+      # Step 5: Check types
+      # Like making sure all puzzle pieces fit together correctly
+      - name: Run type checking
+        run: npm run type-check
+
+      # Step 6: Run tests
+      # Like testing each feature of a car before it leaves the factory
+      - name: Run tests
+        run: npm test -- --coverage --watchAll=false
+
+      # Step 7: Upload test coverage report
+      # Like creating a detailed report of our quality checks
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./visitor-book-frontend/coverage/lcov.info
+          flags: frontend
+
+      # Step 8: Build the application
+      # Like packaging a product for shipping
+      - name: Build application
+        run: npm run build
+
+  # Backend Tests and Build
+  # Similar to frontend tests, but for our backend code
+  # Like testing the engine of a car separately from the body
+  backend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./visitor-book-backend
+
+    # Set up a PostgreSQL database for testing
+    # Like having a test kitchen in a restaurant
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      # Similar steps as frontend, but for backend code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: visitor-book-backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: npm run lint
+
+      - name: Run type checking
+        run: npm run type-check
+
+      - name: Run tests
+        run: npm test -- --coverage
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          NODE_ENV: test
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./visitor-book-backend/coverage/lcov.info
+          flags: backend
+
+      - name: Build application
+        run: npm run build
+
+  # Security Scanning
+  # Like having security guards check for vulnerabilities
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Run Trivy to scan for security vulnerabilities
+      # Like having a security expert inspect a building
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      # Upload security scan results
+      # Like filing a security report
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Build and Push Docker Images
+  # Like packaging our application in containers for shipping
+  build-and-push:
+    needs: [frontend-test, backend-test, security-scan] # Only run if all previous jobs succeed
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Only run on main branch pushes
+
+    # Set permissions for GitHub Container Registry
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Log in to GitHub Container Registry
+      # Like getting access to a secure warehouse
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Set up Docker Buildx for better build performance
+      # Like having advanced tools in our workshop
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Prepare metadata for frontend image
+      # Like creating shipping labels for our packages
+      - name: Extract metadata for frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Prepare metadata for backend image
+      - name: Extract metadata for backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build and push frontend Docker image
+      # Like packaging the frontend part of our application
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./visitor-book-frontend
+          target: runner
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Build and push backend Docker image
+      # Like packaging the backend part of our application
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./visitor-book-backend
+          target: runner
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Deploy to Staging Environment
+  # Like setting up a showroom before the grand opening
+  deploy-staging:
+    needs: build-and-push # Only run after successful build and push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' # Only deploy to staging from develop branch
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Deploy to staging environment
+      # Like setting up a test environment before going live
+      - name: Deploy to staging
+        run: |
+          echo "🚀 Deploying to staging environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}:sha-${{ github.sha }}"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}:sha-${{ github.sha }}"
+          # Deployment commands will go here once we have infrastructure
+
+  # Deploy to Production Environment
+  # Like opening the doors to the public
+  deploy-production:
+    needs: build-and-push # Only run after successful build and push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' # Only deploy to production from main branch
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Deploy to production environment
+      # Like launching the final product
+      - name: Deploy to production
+        run: |
+          echo "🚀 Deploying to production environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}:sha-${{ github.sha }}"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}:sha-${{ github.sha }}"
+          # Deployment commands will go here once we have infrastructure
